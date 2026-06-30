@@ -1,8 +1,8 @@
-# laulamanapps/documentsigner-docusign
+# DocuSign eSignature implementation of the document signer SDK
 
 DocuSign eSignature implementation of the
-[`SignatureProvider`](../sdk/src/Provider/SignatureProvider.php) contract from
-[`laulamanapps/documentsigner-sdk`](../sdk).
+[`SignatureProvider`](https://github.com/LauLamanApps/document-signer-sdk/blob/main/src/Provider/SignatureProvider.php) contract from
+[`laulamanapps/document-signer-sdk`](https://github.com/LauLamanApps/document-signer-sdk).
 
 Uses the OAuth 2.0 JWT user-consent grant to authenticate — no per-call user
 interaction once the integration user has granted consent.
@@ -10,7 +10,7 @@ interaction once the integration user has granted consent.
 ## Install
 
 ```bash
-composer require laulamanapps/documentsigner-docusign
+composer require laulamanapps/document-signer-docusign
 ```
 
 ## Quick start
@@ -103,7 +103,7 @@ The full provider guide — credentials, JWT setup, demo vs prod URLs, endpoint
 mapping, status mapping, sequential signing, token caching, troubleshooting —
 lives in the SDK's docs:
 
-- [DocuSign provider guide](../sdk/docs/providers/docusign.md)
-- [Placeholder syntax](../sdk/docs/placeholders.md)
-- [PDF rendering](../sdk/docs/pdf-rendering.md)
-- [Architecture overview](../sdk/docs/architecture.md)
+- [DocuSign provider guide](https://github.com/LauLamanApps/document-signer-sdk/blob/main/docs/providers/docusign.md)
+- [Placeholder syntax](https://github.com/LauLamanApps/document-signer-sdk/blob/main/docs/placeholders.md)
+- [PDF rendering](https://github.com/LauLamanApps/document-signer-sdk/blob/main/docs/pdf-rendering.md)
+- [Architecture overview](https://github.com/LauLamanApps/document-signer-sdk/blob/main/docs/architecture.md)
