@@ -10,6 +10,7 @@ use LauLamanApps\DocumentSigner\Sdk\Envelope\EnvelopeStatus;
 use LauLamanApps\DocumentSigner\Sdk\Exception\ProviderException;
 use LauLamanApps\DocumentSigner\Sdk\Field\FieldType;
 use LauLamanApps\DocumentSigner\Sdk\Pdf\BrowsershotPdfRenderer;
+use LauLamanApps\DocumentSigner\Sdk\Pdf\PageDecoration;
 use LauLamanApps\DocumentSigner\Sdk\Pdf\PdfRenderer;
 use LauLamanApps\DocumentSigner\Sdk\Placeholder\PlaceholderParser;
 use LauLamanApps\DocumentSigner\Sdk\Placeholder\PreparedField;
@@ -57,7 +58,12 @@ final class DocuSignProvider implements SignatureProvider
             $prepared = $this->replacer->replace($document->html, $this->parser->parse($document->html));
             $this->assertFieldsResolvable($envelope, $document, $prepared->fields);
 
-            $pdf = $this->pdfRenderer->render($prepared->html);
+            $pdf = $this->pdfRenderer->render($prepared->html, new PageDecoration(
+                headerHtml: $document->headerHtml,
+                footerHtml: $document->footerHtml,
+                headerPlacement: $document->headerPlacement,
+                footerPlacement: $document->footerPlacement,
+            ));
             $documentId = (string) $docNumber++;
 
             $apiDocuments[] = [
