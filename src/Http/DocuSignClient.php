@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LauLamanApps\DocumentSigner\DocuSign\Http;
 
 use LauLamanApps\DocumentSigner\Sdk\Exception\ProviderException;
+use LauLamanApps\DocumentSigner\Sdk\Exception\ProviderTransientException;
 use LauLamanApps\DocumentSigner\DocuSign\Auth\DocuSignJwtAuth;
 use LauLamanApps\DocumentSigner\DocuSign\DocuSignConfig;
 use GuzzleHttp\Client;
@@ -47,12 +48,20 @@ final class DocuSignClient
         return $this->jsonRequest('GET', $this->accountPath('envelopes/' . rawurlencode($envelopeId)));
     }
 
-    public function downloadCombinedPdf(string $envelopeId): string
+    public function downloadSignedArchive(string $envelopeId): string
     {
         return $this->rawRequest(
             'GET',
-            $this->accountPath('envelopes/' . rawurlencode($envelopeId) . '/documents/combined'),
-            ['headers' => ['Accept' => 'application/pdf']],
+            $this->accountPath('envelopes/' . rawurlencode($envelopeId) . '/documents/archive'),
+            ['headers' => ['Accept' => 'application/zip']],
+        );
+    }
+
+    public function downloadAuditEventsJson(string $envelopeId): string
+    {
+        return $this->rawRequest(
+            'GET',
+            $this->accountPath('envelopes/' . rawurlencode($envelopeId) . '/audit_events'),
         );
     }
 
@@ -109,20 +118,92 @@ final class DocuSignClient
         try {
             $response = $this->http->request($method, $path, $options);
         } catch (RequestException $e) {
-            $response = $e->getResponse();
-            throw new ProviderException(
-                "DocuSign {$method} {$path} failed: " . $e->getMessage(),
-                httpStatus: $response?->getStatusCode(),
-                providerBody: $response?->getBody()?->getContents(),
-                previous: $e,
-            );
+            throw $this->translateHttpError($method, $path, $e);
         } catch (GuzzleException $e) {
-            throw new ProviderException(
-                "DocuSign {$method} {$path} failed: " . $e->getMessage(),
+            throw new ProviderTransientException(
+                message: sprintf('DocuSign %s /%s transport error: %s', $method, ltrim($path, '/'), $e->getMessage()),
                 previous: $e,
             );
         }
 
         return (string) $response->getBody();
+    }
+
+    private function translateHttpError(string $method, string $path, RequestException $e): ProviderException
+    {
+        $response = $e->getResponse();
+        $status = $response?->getStatusCode();
+        $body = $response?->getBody()?->getContents();
+
+        [$providerCode, $providerMessage, $envelopeId] = $this->parseErrorPayload($body);
+
+        if ($status === null) {
+            return new ProviderTransientException(
+                message: sprintf('DocuSign %s /%s transport error: %s', $method, ltrim($path, '/'), $e->getMessage()),
+                providerBody: $body,
+                previous: $e,
+                providerEnvelopeId: $envelopeId,
+            );
+        }
+
+        return ProviderException::fromHttpStatus(
+            providerName: 'DocuSign',
+            method: $method,
+            path: $path,
+            status: $status,
+            providerCode: $providerCode,
+            providerMessage: $providerMessage,
+            providerBody: $body,
+            previous: $e,
+            retryAfterSeconds: $this->parseRetryAfter($response?->getHeaderLine('Retry-After')),
+            providerEnvelopeId: $envelopeId,
+        );
+    }
+
+    /**
+     * DocuSign error responses look like `{ "errorCode": "INVALID_EMAIL_ADDRESS", "message": "..." }`;
+     * post-creation failures (rare, but possible on multi-step operations) can also include an
+     * `envelopeId` field pointing at the already-created envelope.
+     *
+     * @return array{0: ?string, 1: ?string, 2: ?string} Tuple of (providerCode, providerMessage, providerEnvelopeId).
+     */
+    private function parseErrorPayload(?string $body): array
+    {
+        if (!is_string($body) || $body === '') {
+            return [null, null, null];
+        }
+
+        try {
+            $decoded = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return [null, null, null];
+        }
+
+        if (!is_array($decoded)) {
+            return [null, null, null];
+        }
+
+        $code = is_string($decoded['errorCode'] ?? null) ? $decoded['errorCode'] : null;
+        $message = is_string($decoded['message'] ?? null) ? $decoded['message'] : null;
+        $envelopeId = is_string($decoded['envelopeId'] ?? null) && $decoded['envelopeId'] !== ''
+            ? $decoded['envelopeId']
+            : null;
+
+        return [$code, $message, $envelopeId];
+    }
+
+    private function parseRetryAfter(?string $header): ?int
+    {
+        if ($header === null || $header === '') {
+            return null;
+        }
+        if (ctype_digit($header)) {
+            return (int) $header;
+        }
+        $timestamp = strtotime($header);
+        if ($timestamp === false) {
+            return null;
+        }
+        return max(0, $timestamp - time());
     }
 }

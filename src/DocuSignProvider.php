@@ -17,6 +17,7 @@ use LauLamanApps\DocumentSigner\Sdk\Provider\EnvelopeReceipt;
 use LauLamanApps\DocumentSigner\Sdk\Provider\SignatureProvider;
 use LauLamanApps\DocumentSigner\Sdk\Signer\Signer;
 use LauLamanApps\DocumentSigner\Sdk\Signer\SigningOrder;
+use LauLamanApps\DocumentSigner\Sdk\Support\TempFile;
 use LauLamanApps\DocumentSigner\DocuSign\Auth\DocuSignJwtAuth;
 use LauLamanApps\DocumentSigner\DocuSign\Http\DocuSignClient;
 use LauLamanApps\DocumentSigner\DocuSign\Placeholder\DocuSignPlaceholderReplacer;
@@ -115,13 +116,23 @@ final class DocuSignProvider implements SignatureProvider
             );
         }
 
-        return new EnvelopeReceipt(
-            provider: self::NAME,
-            providerEnvelopeId: $envelopeId,
-            status: $this->mapStatus($response['status'] ?? 'sent'),
-            signerUrls: [],
-            raw: $response,
-        );
+        try {
+            return new EnvelopeReceipt(
+                provider: self::NAME,
+                providerEnvelopeId: $envelopeId,
+                status: $this->mapStatus($response['status'] ?? 'sent'),
+                signerUrls: [],
+                raw: $response,
+            );
+        } catch (ProviderException $e) {
+            throw $e->withProviderEnvelopeId($envelopeId);
+        } catch (\Throwable $e) {
+            throw new ProviderException(
+                message: 'DocuSign envelope was created but the SDK failed to build the receipt: ' . $e->getMessage(),
+                previous: $e,
+                providerEnvelopeId: $envelopeId,
+            );
+        }
     }
 
     public function getStatus(string $providerEnvelopeId): EnvelopeStatus
@@ -130,9 +141,22 @@ final class DocuSignProvider implements SignatureProvider
         return $this->mapStatus($response['status'] ?? null);
     }
 
-    public function downloadSigned(string $providerEnvelopeId): string
+    public function downloadSigned(string $providerEnvelopeId): \SplFileInfo
     {
-        return $this->client->downloadCombinedPdf($providerEnvelopeId);
+        return TempFile::fromBytes(
+            bytes: $this->client->downloadSignedArchive($providerEnvelopeId),
+            prefix: 'docusign-signed-',
+            extension: 'zip',
+        );
+    }
+
+    public function downloadAudit(string $providerEnvelopeId): \SplFileInfo
+    {
+        return TempFile::fromBytes(
+            bytes: $this->client->downloadAuditEventsJson($providerEnvelopeId),
+            prefix: 'docusign-audit-',
+            extension: 'json',
+        );
     }
 
     public function cancel(string $providerEnvelopeId, ?string $reason = null): void

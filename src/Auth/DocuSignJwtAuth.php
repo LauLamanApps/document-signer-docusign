@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LauLamanApps\DocumentSigner\DocuSign\Auth;
 
 use LauLamanApps\DocumentSigner\Sdk\Exception\ProviderException;
+use LauLamanApps\DocumentSigner\Sdk\Exception\ProviderTransientException;
 use LauLamanApps\DocumentSigner\DocuSign\DocuSignConfig;
 use Firebase\JWT\JWT;
 use GuzzleHttp\Client;
@@ -67,14 +68,33 @@ final class DocuSignJwtAuth
             ]);
         } catch (RequestException $e) {
             $r = $e->getResponse();
-            throw new ProviderException(
-                'DocuSign JWT exchange failed: ' . $e->getMessage(),
-                httpStatus: $r?->getStatusCode(),
-                providerBody: $r?->getBody()?->getContents(),
+            $status = $r?->getStatusCode();
+            $body = $r?->getBody()?->getContents();
+            [$code, $message] = $this->parseOAuthErrorPayload($body);
+
+            if ($status === null) {
+                throw new ProviderTransientException(
+                    message: 'DocuSign OAuth transport error: ' . $e->getMessage(),
+                    providerBody: $body,
+                    previous: $e,
+                );
+            }
+
+            throw ProviderException::fromHttpStatus(
+                providerName: 'DocuSign',
+                method: 'POST',
+                path: '/oauth/token',
+                status: $status,
+                providerCode: $code,
+                providerMessage: $message,
+                providerBody: $body,
                 previous: $e,
             );
         } catch (GuzzleException $e) {
-            throw new ProviderException('DocuSign JWT exchange failed: ' . $e->getMessage(), previous: $e);
+            throw new ProviderTransientException(
+                message: 'DocuSign OAuth transport error: ' . $e->getMessage(),
+                previous: $e,
+            );
         }
 
         $body = (string) $response->getBody();
@@ -102,5 +122,32 @@ final class DocuSignJwtAuth
         $this->cachedExpiresAt = $now + $expiresIn;
 
         return $token;
+    }
+
+    /**
+     * DocuSign OAuth errors look like `{ "error": "consent_required", "error_description": "..." }`.
+     *
+     * @return array{0: ?string, 1: ?string} Tuple of (providerCode, providerMessage).
+     */
+    private function parseOAuthErrorPayload(?string $body): array
+    {
+        if (!is_string($body) || $body === '') {
+            return [null, null];
+        }
+
+        try {
+            $decoded = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return [null, null];
+        }
+
+        if (!is_array($decoded)) {
+            return [null, null];
+        }
+
+        $code = is_string($decoded['error'] ?? null) ? $decoded['error'] : null;
+        $message = is_string($decoded['error_description'] ?? null) ? $decoded['error_description'] : null;
+
+        return [$code, $message];
     }
 }

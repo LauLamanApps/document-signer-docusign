@@ -62,6 +62,23 @@ For every document in the envelope, this package:
 Access tokens are minted via JWT and cached in memory by `DocuSignJwtAuth`
 until 60s before expiry. Reuse one `DocuSignProvider` per process.
 
+## Downloads
+
+Both `downloadSigned()` and `downloadAudit()` write to a temp file and hand you
+an `\SplFileInfo` — check the extension:
+
+```php
+$archive = $provider->downloadSigned($envelopeId);
+// $archive->getExtension() === 'zip'
+// A ZIP with one signed PDF per envelope document (endpoint: /envelopes/{id}/documents/archive)
+
+$audit = $provider->downloadAudit($envelopeId);
+// $audit->getExtension() === 'json'
+// The envelope audit-events feed as JSON (endpoint: /envelopes/{id}/audit_events)
+```
+
+Callers own the file lifecycle — copy or `@unlink()` when done.
+
 ## Field mapping
 
 | SDK `FieldType` | DocuSign tab bucket |

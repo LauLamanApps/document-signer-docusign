@@ -88,6 +88,70 @@ final class DocuSignProviderTest extends TestCase
     }
 
     #[Test]
+    public function send_throws_a_validation_exception_with_the_provider_message_for_400_responses(): void
+    {
+        [$provider] = $this->buildProvider([
+            new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
+            new Response(400, [], json_encode([
+                'errorCode' => 'INVALID_EMAIL_ADDRESS',
+                'message'   => 'The email address is invalid.',
+            ])),
+        ]);
+
+        try {
+            $provider->send($this->envelopeWithOneSigner());
+            self::fail('Expected ProviderValidationException.');
+        } catch (\LauLamanApps\DocumentSigner\Sdk\Exception\ProviderValidationException $e) {
+            self::assertSame(400, $e->httpStatus);
+            self::assertSame('INVALID_EMAIL_ADDRESS', $e->providerCode);
+            self::assertSame('The email address is invalid.', $e->providerMessage);
+            self::assertStringContainsString('[400 INVALID_EMAIL_ADDRESS]', $e->getMessage());
+            self::assertFalse($e->isRetryable());
+        }
+    }
+
+    #[Test]
+    public function send_carries_the_envelope_id_when_the_error_body_echoes_one(): void
+    {
+        [$provider] = $this->buildProvider([
+            new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
+            new Response(409, [], json_encode([
+                'errorCode'  => 'ENVELOPE_ALREADY_SENT',
+                'message'    => 'The envelope is already in the sent state.',
+                'envelopeId' => 'env-echo-42',
+            ])),
+        ]);
+
+        try {
+            $provider->send($this->envelopeWithOneSigner());
+            self::fail('Expected ProviderValidationException.');
+        } catch (\LauLamanApps\DocumentSigner\Sdk\Exception\ProviderValidationException $e) {
+            self::assertSame('env-echo-42', $e->providerEnvelopeId);
+        }
+    }
+
+    #[Test]
+    public function send_throws_an_authentication_exception_for_401_responses(): void
+    {
+        [$provider] = $this->buildProvider([
+            new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
+            new Response(401, [], json_encode([
+                'errorCode' => 'AUTHORIZATION_INVALID_TOKEN',
+                'message'   => 'The access token is missing or invalid.',
+            ])),
+        ]);
+
+        try {
+            $provider->send($this->envelopeWithOneSigner());
+            self::fail('Expected ProviderAuthenticationException.');
+        } catch (\LauLamanApps\DocumentSigner\Sdk\Exception\ProviderAuthenticationException $e) {
+            self::assertSame(401, $e->httpStatus);
+            self::assertSame('AUTHORIZATION_INVALID_TOKEN', $e->providerCode);
+            self::assertFalse($e->isRetryable());
+        }
+    }
+
+    #[Test]
     public function get_status_maps_provider_status_strings(): void
     {
         [$provider] = $this->buildProvider([
@@ -102,6 +166,52 @@ final class DocuSignProviderTest extends TestCase
         self::assertSame(EnvelopeStatus::Voided,    $provider->getStatus('e2'));
         self::assertSame(EnvelopeStatus::Declined,  $provider->getStatus('e3'));
         self::assertSame(EnvelopeStatus::Unknown,   $provider->getStatus('e4'));
+    }
+
+    #[Test]
+    public function download_signed_returns_the_archive_zip(): void
+    {
+        [$provider, $history] = $this->buildProvider([
+            new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
+            new Response(200, [], 'PK-FAKE-ZIP-BYTES'),
+        ]);
+
+        $file = $provider->downloadSigned('env-42');
+
+        self::assertInstanceOf(\SplFileInfo::class, $file);
+        self::assertSame('zip', $file->getExtension());
+        self::assertSame('PK-FAKE-ZIP-BYTES', file_get_contents($file->getPathname()));
+
+        self::assertStringContainsString(
+            '/envelopes/env-42/documents/archive',
+            (string) $history[1]['request']->getUri(),
+        );
+
+        @unlink($file->getPathname());
+    }
+
+    #[Test]
+    public function download_audit_returns_the_audit_events_json(): void
+    {
+        [$provider, $history] = $this->buildProvider([
+            new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
+            new Response(200, [], '{"auditEvents":[{"eventFields":[{"name":"action","value":"Sent"}]}]}'),
+        ]);
+
+        $file = $provider->downloadAudit('env-42');
+
+        self::assertSame('json', $file->getExtension());
+
+        $payload = json_decode((string) file_get_contents($file->getPathname()), true, 512, JSON_THROW_ON_ERROR);
+        self::assertArrayHasKey('auditEvents', $payload);
+        self::assertSame('Sent', $payload['auditEvents'][0]['eventFields'][0]['value']);
+
+        self::assertStringContainsString(
+            '/envelopes/env-42/audit_events',
+            (string) $history[1]['request']->getUri(),
+        );
+
+        @unlink($file->getPathname());
     }
 
     /**
