@@ -65,6 +65,29 @@ final class DocuSignClient
         );
     }
 
+    /**
+     * @return array<string, mixed>
+     */
+    public function getFormData(string $envelopeId): array
+    {
+        return $this->jsonRequest('GET', $this->accountPath('envelopes/' . rawurlencode($envelopeId) . '/form_data'));
+    }
+
+    /**
+     * Recipients + their tabs (with filled-in `value`s after signing). We use
+     * this instead of `/form_data` because it exposes `documentId` per tab, so
+     * we can group field values by document like ValidSign's `/fieldSummary` does.
+     *
+     * @return array<string, mixed>
+     */
+    public function getRecipientsWithTabs(string $envelopeId): array
+    {
+        return $this->jsonRequest(
+            'GET',
+            $this->accountPath('envelopes/' . rawurlencode($envelopeId) . '/recipients?include_tabs=true'),
+        );
+    }
+
     public function voidEnvelope(string $envelopeId, ?string $reason): void
     {
         $this->jsonRequest('PUT', $this->accountPath('envelopes/' . rawurlencode($envelopeId)), [

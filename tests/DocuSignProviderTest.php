@@ -243,6 +243,64 @@ final class DocuSignProviderTest extends TestCase
         return [$provider, $history];
     }
 
+    #[Test]
+    public function get_field_values_returns_tab_values_from_the_recipients_endpoint(): void
+    {
+        [$provider, $history] = $this->buildProvider([
+            new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
+            new Response(200, [], json_encode([
+                'signers' => [
+                    [
+                        'recipientId' => '1',
+                        'tabs' => [
+                            'textTabs' => [
+                                [
+                                    'documentId' => '1',
+                                    'tabLabel'   => 'iban',
+                                    'value'      => 'NL91ABNA0417164300',
+                                ],
+                                [
+                                    'documentId' => '1',
+                                    'tabLabel'   => 'fullname',
+                                    'value'      => 'Jane Doe',
+                                ],
+                                [
+                                    // Optional field left blank
+                                    'documentId' => '1',
+                                    'tabLabel'   => 'phone',
+                                    'value'      => '',
+                                ],
+                            ],
+                            'checkboxTabs' => [
+                                [
+                                    'documentId' => '1',
+                                    'tabLabel'   => 'opt_in',
+                                    'selected'   => 'true',
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ])),
+        ]);
+
+        $values = $provider->getFieldValues('env-42');
+
+        self::assertStringContainsString(
+            '/envelopes/env-42/recipients?include_tabs=true',
+            (string) $history[1]['request']->getUri(),
+        );
+        self::assertCount(4, $values);
+
+        $byName = array_column($values, null, 'fieldName');
+        self::assertSame('NL91ABNA0417164300', $byName['iban']->value);
+        self::assertSame('Jane Doe', $byName['fullname']->value);
+        self::assertNull($byName['phone']->value, 'empty string is normalised to null');
+        self::assertSame('true', $byName['opt_in']->value);
+        self::assertSame('1', $byName['iban']->documentId);
+        self::assertSame('1', $byName['iban']->signerKey);
+    }
+
     private function envelopeWithOneSigner(): Envelope
     {
         return new Envelope(
@@ -256,6 +314,40 @@ final class DocuSignProviderTest extends TestCase
             emailSubject: 'Please sign the NDA',
             signingOrder: SigningOrder::Parallel,
         );
+    }
+
+    #[Test]
+    public function required_flag_on_text_and_checkbox_tabs_is_threaded_through(): void
+    {
+        $envelope = new Envelope(
+            name:         'NDA',
+            documents:    [new Document(
+                id:   'nda',
+                name: 'NDA',
+                html: '<p>{[text:s1:required_notes]}{[?text:s1:optional_notes]}'
+                    . '{[checkbox:s1:required_agree]}{[?checkbox:s1:optional_marketing]}</p>',
+            )],
+            signers:      [new Signer('s1', 'Jane Doe', 'jane@example.com')],
+            emailSubject: 'Please sign the NDA',
+        );
+
+        [$provider, $history] = $this->buildProvider([
+            new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
+            new Response(201, [], json_encode(['envelopeId' => 'env-xyz', 'status' => 'sent'])),
+        ]);
+
+        $provider->send($envelope);
+
+        $payload = json_decode((string) $history[1]['request']->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        $tabs = $payload['recipients']['signers'][0]['tabs'];
+
+        $textByLabel = array_column($tabs['textTabs'], null, 'tabLabel');
+        self::assertSame('true',  $textByLabel['required_notes']['required']);
+        self::assertSame('false', $textByLabel['optional_notes']['required']);
+
+        $checkboxByLabel = array_column($tabs['checkboxTabs'], null, 'tabLabel');
+        self::assertSame('true',  $checkboxByLabel['required_agree']['required']);
+        self::assertSame('false', $checkboxByLabel['optional_marketing']['required']);
     }
 
     private function fakePdfRenderer(): PdfRenderer

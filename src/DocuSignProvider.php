@@ -15,6 +15,7 @@ use LauLamanApps\DocumentSigner\Sdk\Pdf\PdfRenderer;
 use LauLamanApps\DocumentSigner\Sdk\Placeholder\PlaceholderParser;
 use LauLamanApps\DocumentSigner\Sdk\Placeholder\PreparedField;
 use LauLamanApps\DocumentSigner\Sdk\Provider\EnvelopeReceipt;
+use LauLamanApps\DocumentSigner\Sdk\Provider\FieldValue;
 use LauLamanApps\DocumentSigner\Sdk\Provider\SignatureProvider;
 use LauLamanApps\DocumentSigner\Sdk\Signer\Signer;
 use LauLamanApps\DocumentSigner\Sdk\Signer\SigningOrder;
@@ -165,6 +166,43 @@ final class DocuSignProvider implements SignatureProvider
         );
     }
 
+    public function getFieldValues(string $providerEnvelopeId): array
+    {
+        $response = $this->client->getRecipientsWithTabs($providerEnvelopeId);
+
+        $out = [];
+        foreach (($response['signers'] ?? []) as $signer) {
+            if (!is_array($signer)) {
+                continue;
+            }
+            $signerId = is_string($signer['recipientId'] ?? null) ? $signer['recipientId'] : '';
+            $tabs     = is_array($signer['tabs'] ?? null) ? $signer['tabs'] : [];
+
+            // DocuSign exposes filled values on textTabs, checkboxTabs, dateSignedTabs,
+            // fullNameTabs, emailTabs, etc. — we surface every tab with a `value` or
+            // `selected` string, so callers can pull SEPA IBANs, opt-in checkboxes,
+            // signed dates, etc.
+            foreach (['textTabs', 'checkboxTabs', 'dateSignedTabs', 'listTabs', 'radioGroupTabs',
+                      'ssnTabs', 'zipTabs', 'phoneTabs', 'emailTabs', 'firstNameTabs', 'lastNameTabs',
+                      'fullNameTabs', 'titleTabs', 'companyTabs'] as $bucket) {
+                foreach (($tabs[$bucket] ?? []) as $tab) {
+                    if (!is_array($tab)) {
+                        continue;
+                    }
+                    $value = $tab['value'] ?? ($tab['selected'] ?? null);
+                    $out[] = new FieldValue(
+                        documentId: is_string($tab['documentId'] ?? null) ? $tab['documentId'] : '',
+                        signerKey:  $signerId,
+                        fieldName:  is_string($tab['tabLabel'] ?? null) ? $tab['tabLabel'] : '',
+                        value:      is_string($value) && $value !== '' ? $value : null,
+                    );
+                }
+            }
+        }
+
+        return $out;
+    }
+
     public function cancel(string $providerEnvelopeId, ?string $reason = null): void
     {
         $this->client->voidEnvelope($providerEnvelopeId, $reason);
@@ -231,10 +269,14 @@ final class DocuSignProvider implements SignatureProvider
             'anchorCaseSensitive'      => 'true',
         ];
 
+        // Signature / initials / dateSigned tabs are always required in DocuSign
+        // and don't accept the `required` attribute. Text and Checkbox tabs do.
         if ($field->type === FieldType::Text) {
-            $tab['required'] = 'true';
+            $tab['required'] = $field->required ? 'true' : 'false';
             $tab['width']    = 180;
             $tab['height']   = 18;
+        } elseif ($field->type === FieldType::Checkbox) {
+            $tab['required'] = $field->required ? 'true' : 'false';
         }
 
         return $tab;
