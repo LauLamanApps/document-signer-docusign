@@ -191,6 +191,31 @@ final class DocuSignProviderTest extends TestCase
     }
 
     #[Test]
+    public function download_signed_document_returns_the_pdf_for_a_single_document(): void
+    {
+        [$provider, $history] = $this->buildProvider([
+            new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
+            new Response(200, [], '%PDF-SIGNED-NDA'),
+        ]);
+
+        $file = $provider->downloadSignedDocument('env-42', '1');
+
+        self::assertSame('pdf', $file->getExtension());
+        self::assertSame('%PDF-SIGNED-NDA', file_get_contents($file->getPathname()));
+
+        self::assertStringContainsString(
+            '/envelopes/env-42/documents/1',
+            (string) $history[1]['request']->getUri(),
+        );
+        self::assertSame(
+            'application/pdf',
+            $history[1]['request']->getHeaderLine('Accept'),
+        );
+
+        @unlink($file->getPathname());
+    }
+
+    #[Test]
     public function download_audit_returns_the_audit_events_json(): void
     {
         [$provider, $history] = $this->buildProvider([

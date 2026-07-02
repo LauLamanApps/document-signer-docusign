@@ -64,13 +64,18 @@ until 60s before expiry. Reuse one `DocuSignProvider` per process.
 
 ## Downloads
 
-Both `downloadSigned()` and `downloadAudit()` write to a temp file and hand you
-an `\SplFileInfo` — check the extension:
+`downloadSigned()`, `downloadSignedDocument()`, and `downloadAudit()` all
+write to a temp file and hand you an `\SplFileInfo` — check the extension:
 
 ```php
 $archive = $provider->downloadSigned($envelopeId);
 // $archive->getExtension() === 'zip'
 // A ZIP with one signed PDF per envelope document (endpoint: /envelopes/{id}/documents/archive)
+
+$pdf = $provider->downloadSignedDocument($envelopeId, '1');
+// $pdf->getExtension() === 'pdf'
+// The signed PDF for a single document (endpoint: /envelopes/{id}/documents/{documentId})
+// $documentId is the same id you set on Document::$id when calling send().
 
 $audit = $provider->downloadAudit($envelopeId);
 // $audit->getExtension() === 'json'

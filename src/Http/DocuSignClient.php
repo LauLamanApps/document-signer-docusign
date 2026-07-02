@@ -57,6 +57,17 @@ final class DocuSignClient
         );
     }
 
+    public function downloadSignedDocument(string $envelopeId, string $documentId): string
+    {
+        return $this->rawRequest(
+            'GET',
+            $this->accountPath(
+                'envelopes/' . rawurlencode($envelopeId) . '/documents/' . rawurlencode($documentId),
+            ),
+            ['headers' => ['Accept' => 'application/pdf']],
+        );
+    }
+
     public function downloadAuditEventsJson(string $envelopeId): string
     {
         return $this->rawRequest(
