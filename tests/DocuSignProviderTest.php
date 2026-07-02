@@ -216,6 +216,14 @@ final class DocuSignProviderTest extends TestCase
     }
 
     #[Test]
+    public function has_audit_trail_is_true_because_docusign_ships_the_audit_events_feed(): void
+    {
+        [$provider] = $this->buildProvider([]);
+
+        self::assertTrue($provider->hasAuditTrail());
+    }
+
+    #[Test]
     public function download_audit_returns_the_audit_events_json(): void
     {
         [$provider, $history] = $this->buildProvider([
