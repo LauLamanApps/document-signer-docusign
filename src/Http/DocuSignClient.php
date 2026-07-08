@@ -58,14 +58,10 @@ final class DocuSignClient
     }
 
     /**
-     * List the envelope's documents, including each one's `documentFields`
-     * (custom name/value metadata set at send time) and DocuSign's positional
-     * `documentId`. Used to resolve a caller's `Document::$id` back to the
-     * positional id DocuSign needs for a single-document download.
-     *
-     * `include_document_fields=true` guarantees the `documentFields` are present
-     * on every entry. The response also carries the certificate-of-completion as
-     * a synthetic entry whose `documentId` is `"certificate"`.
+     * List the envelope's documents — each carries DocuSign's positional
+     * `documentId` and `name`. The response also includes the
+     * certificate-of-completion as a synthetic entry whose `documentId` is
+     * `"certificate"`. Used only for name-based fallback resolution.
      *
      * @return array<string, mixed>
      */
@@ -73,9 +69,22 @@ final class DocuSignClient
     {
         return $this->jsonRequest(
             'GET',
-            $this->accountPath(
-                'envelopes/' . rawurlencode($envelopeId) . '/documents?include_document_fields=true',
-            ),
+            $this->accountPath('envelopes/' . rawurlencode($envelopeId) . '/documents'),
+        );
+    }
+
+    /**
+     * The envelope's custom fields (`textCustomFields` / `listCustomFields`).
+     * Unlike inline per-document fields at creation, these round-trip reliably,
+     * so we read the SDK's `Document::$id => positional id` map back from here.
+     *
+     * @return array<string, mixed>
+     */
+    public function getEnvelopeCustomFields(string $envelopeId): array
+    {
+        return $this->jsonRequest(
+            'GET',
+            $this->accountPath('envelopes/' . rawurlencode($envelopeId) . '/custom_fields'),
         );
     }
 

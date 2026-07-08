@@ -73,12 +73,18 @@ final class DocuSignProviderTest extends TestCase
         self::assertNotEmpty($payload['documents'][0]['documentBase64']);
         self::assertStringStartsWith('%PDF-FAKE', base64_decode($payload['documents'][0]['documentBase64']));
 
-        // The caller's Document::$id ('nda') is persisted as a documentField so a
-        // later downloadSignedDocument('nda') can resolve back to this document.
-        self::assertSame(
-            [['name' => 'sdkDocumentId', 'value' => 'nda']],
-            $payload['documents'][0]['documentFields'],
-        );
+        // The caller-id map is stored as an ENVELOPE-level custom field (these
+        // round-trip), NOT as inline per-document fields (DocuSign drops those).
+        self::assertArrayNotHasKey('documentFields', $payload['documents'][0]);
+
+        $mapField = null;
+        foreach ($payload['customFields']['textCustomFields'] as $field) {
+            if ($field['name'] === 'sdkDocumentMap') {
+                $mapField = $field;
+            }
+        }
+        self::assertNotNull($mapField, 'envelope custom fields must carry sdkDocumentMap');
+        self::assertSame(['nda' => '1'], json_decode($mapField['value'], true));
     }
 
     #[Test]
@@ -199,26 +205,27 @@ final class DocuSignProviderTest extends TestCase
     }
 
     #[Test]
-    public function download_signed_document_resolves_the_caller_id_via_the_document_field(): void
+    public function download_signed_document_resolves_the_caller_id_via_the_envelope_custom_field_map(): void
     {
-        // Caller asks for their own id 'C-1-sepa'; it lives on the second
-        // document, whose positional DocuSign id is '2'.
+        // Caller asks for their own id 'C-2607-WPNB-sepa' (which is NOT the
+        // document name); it maps to positional '2' via the envelope custom field.
         [$provider, $history] = $this->buildProvider([
             new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
-            new Response(200, [], json_encode($this->documentListBody())),
+            new Response(200, [], json_encode($this->customFieldsBody([
+                'O-2607-JZXK-offer' => '1',
+                'C-2607-WPNB-sepa'  => '2',
+            ]))),
             new Response(200, [], '%PDF-SIGNED-SEPA'),
         ]);
 
-        $file = $provider->downloadSignedDocument('env-42', 'C-1-sepa');
+        $file = $provider->downloadSignedDocument('env-42', 'C-2607-WPNB-sepa');
 
         self::assertSame('pdf', $file->getExtension());
         self::assertSame('%PDF-SIGNED-SEPA', file_get_contents($file->getPathname()));
 
-        // It first listed the documents (with fields), then fetched positional '2'.
-        self::assertStringContainsString(
-            '/envelopes/env-42/documents?include_document_fields=true',
-            (string) $history[1]['request']->getUri(),
-        );
+        // It read the envelope custom fields (the map), then fetched positional
+        // '2' directly — no document-list call needed.
+        self::assertStringContainsString('/envelopes/env-42/custom_fields', (string) $history[1]['request']->getUri());
         self::assertStringContainsString('/envelopes/env-42/documents/2', (string) $history[2]['request']->getUri());
         self::assertSame('application/pdf', $history[2]['request']->getHeaderLine('Accept'));
 
@@ -226,28 +233,54 @@ final class DocuSignProviderTest extends TestCase
     }
 
     #[Test]
-    public function download_signed_document_falls_back_to_the_normalized_name(): void
+    public function download_signed_document_does_not_rely_on_inline_document_fields(): void
     {
-        // Older envelope: no documentFields. The caller passes a name whose
-        // spacing/casing differs from DocuSign's stored, underscore-mangled name.
-        $list = [
-            'envelopeDocuments' => [
-                ['documentId' => '1', 'name' => 'NDA', 'type' => 'content'],
-                ['documentId' => '2', 'name' => 'SEPA_machtiging_C-1', 'type' => 'content'],
-                ['documentId' => 'certificate', 'name' => 'Summary', 'type' => 'summary'],
-            ],
-        ];
-
+        // Regression for the v2.3.0 bug: DocuSign silently drops inline
+        // documents[].documentFields, so they can never be read back. Resolution
+        // must come from the round-tripping envelope custom-field map alone —
+        // the document list (which has no documentFields) is not even consulted
+        // on the happy path.
         [$provider, $history] = $this->buildProvider([
             new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
-            new Response(200, [], json_encode($list)),
+            new Response(200, [], json_encode($this->customFieldsBody(['O-2607-JZXK-offer' => '1']))),
+            new Response(200, [], '%PDF-SIGNED-OFFER'),
+        ]);
+
+        $file = $provider->downloadSignedDocument('env-42', 'O-2607-JZXK-offer');
+
+        self::assertSame('%PDF-SIGNED-OFFER', file_get_contents($file->getPathname()));
+
+        // Exactly three requests: auth, custom_fields, single-document. No
+        // /documents list call and no dependency on per-document fields.
+        self::assertCount(3, $history);
+        self::assertStringContainsString('/envelopes/env-42/custom_fields', (string) $history[1]['request']->getUri());
+        self::assertStringContainsString('/envelopes/env-42/documents/1', (string) $history[2]['request']->getUri());
+
+        @unlink($file->getPathname());
+    }
+
+    #[Test]
+    public function download_signed_document_falls_back_to_the_normalized_name(): void
+    {
+        // Older envelope: no map in custom fields. The caller passes a name whose
+        // spacing/casing differs from DocuSign's stored, underscore-mangled name.
+        [$provider, $history] = $this->buildProvider([
+            new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
+            new Response(200, [], json_encode($this->customFieldsBody([]))),      // no map
+            new Response(200, [], json_encode([
+                'envelopeDocuments' => [
+                    ['documentId' => '1', 'name' => 'NDA', 'type' => 'content'],
+                    ['documentId' => '2', 'name' => 'SEPA_machtiging_C-1', 'type' => 'content'],
+                    ['documentId' => 'certificate', 'name' => 'Summary', 'type' => 'summary'],
+                ],
+            ])),
             new Response(200, [], '%PDF-SIGNED-SEPA'),
         ]);
 
         $file = $provider->downloadSignedDocument('env-42', 'sepa machtiging c-1');
 
         self::assertSame('%PDF-SIGNED-SEPA', file_get_contents($file->getPathname()));
-        self::assertStringContainsString('/envelopes/env-42/documents/2', (string) $history[2]['request']->getUri());
+        self::assertStringContainsString('/envelopes/env-42/documents/2', (string) $history[3]['request']->getUri());
 
         @unlink($file->getPathname());
     }
@@ -255,19 +288,17 @@ final class DocuSignProviderTest extends TestCase
     #[Test]
     public function download_signed_document_ignores_the_certificate_and_throws_when_unresolved(): void
     {
-        // The only entry that could name-match is the Summary certificate, which
-        // must be skipped — so this resolves to nothing.
-        $list = [
-            'envelopeDocuments' => [
-                ['documentId' => '1', 'name' => 'NDA', 'type' => 'content',
-                 'documentFields' => [['name' => 'sdkDocumentId', 'value' => 'nda']]],
-                ['documentId' => 'certificate', 'name' => 'Summary', 'type' => 'summary'],
-            ],
-        ];
-
+        // No map, and the only name-matchable entry is the Summary certificate,
+        // which must be skipped — so this resolves to nothing.
         [$provider] = $this->buildProvider([
             new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
-            new Response(200, [], json_encode($list)),
+            new Response(200, [], json_encode($this->customFieldsBody([]))),
+            new Response(200, [], json_encode([
+                'envelopeDocuments' => [
+                    ['documentId' => '1', 'name' => 'NDA', 'type' => 'content'],
+                    ['documentId' => 'certificate', 'name' => 'Summary', 'type' => 'summary'],
+                ],
+            ])),
         ]);
 
         try {
@@ -281,19 +312,17 @@ final class DocuSignProviderTest extends TestCase
     }
 
     /**
-     * A two-document envelope list with caller-id fields, plus the certificate.
+     * A DocuSign custom-fields response carrying the SDK's document-id map.
      *
+     * @param array<string, string> $map
      * @return array<string, mixed>
      */
-    private function documentListBody(): array
+    private function customFieldsBody(array $map): array
     {
         return [
-            'envelopeDocuments' => [
-                ['documentId' => '1', 'name' => 'NDA', 'type' => 'content',
-                 'documentFields' => [['name' => 'sdkDocumentId', 'value' => 'nda']]],
-                ['documentId' => '2', 'name' => 'SEPA machtiging C-1', 'type' => 'content',
-                 'documentFields' => [['name' => 'sdkDocumentId', 'value' => 'C-1-sepa']]],
-                ['documentId' => 'certificate', 'name' => 'Summary', 'type' => 'summary'],
+            'textCustomFields' => [
+                ['name' => 'tenant', 'value' => 'acme'],
+                ['name' => 'sdkDocumentMap', 'value' => json_encode($map)],
             ],
         ];
     }

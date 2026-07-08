@@ -3,6 +3,25 @@
 All notable changes to `laulamanapps/document-signer-docusign` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.3.1] - 2026-07-08
+
+### Fixed — `downloadSignedDocument()` failed for every DocuSign envelope
+
+2.3.0 stored the caller's `Document::$id` in each document's inline
+`documents[].documentFields` at envelope creation and read it back from the
+document list. DocuSign **silently drops** inline per-document fields supplied
+at creation, so the field was never returned and resolution failed for every
+envelope — including completed, fully-signed ones — with
+`SignedDocumentUnavailableException`.
+
+The id → positional-id map is now stored in an **envelope-level** text custom
+field (`sdkDocumentMap`), which DocuSign persists and returns. `send()` writes
+it; `downloadSignedDocument()` reads it via `GET envelopes/{id}/custom_fields`,
+falling back to a normalized document-name match (and always skipping the
+`Summary.pdf` certificate). No API or contract change — envelopes sent with this
+version resolve correctly, including multi-document envelopes where
+`Document::$id` differs from `Document::$name`.
+
 ## [2.3.0] - 2026-07-08
 
 ### Changed — `downloadSignedDocument()` now takes your own document id

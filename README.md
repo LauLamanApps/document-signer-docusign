@@ -72,14 +72,18 @@ $archive = $provider->downloadSigned($envelopeId);
 // $archive->getExtension() === 'zip'
 // A ZIP with one signed PDF per envelope document (endpoint: /envelopes/{id}/documents/archive)
 
-$pdf = $provider->downloadSignedDocument($envelopeId, '1');
+$pdf = $provider->downloadSignedDocument($envelopeId, 'sow');
 // $pdf->getExtension() === 'pdf'
-// The signed PDF for a single document (endpoint: /envelopes/{id}/documents/{documentId})
-// $documentId is the same id you set on Document::$id when calling send().
+// The signed PDF for a single document. Pass the same id you set on
+// Document::$id when calling send() ('sow' above) — resolved to DocuSign's
+// positional id via the sdkDocumentMap envelope custom field (see setup below).
+// Throws the retryable SignedDocumentUnavailableException if it isn't ready yet.
 
 $audit = $provider->downloadAudit($envelopeId);
-// $audit->getExtension() === 'json'
-// The envelope audit-events feed as JSON (endpoint: /envelopes/{id}/audit_events)
+// $audit->getExtension() === 'pdf'
+// The Certificate of Completion PDF — DocuSign's human-readable evidence report
+// (endpoint: /envelopes/{id}/documents/certificate). For the raw audit-events
+// JSON, call DocuSignClient::downloadAuditEventsJson() directly.
 ```
 
 Callers own the file lifecycle — copy or `@unlink()` when done.
@@ -110,9 +114,32 @@ https://account-d.docusign.com/oauth/auth
 Use `account.docusign.com` in production. After consent, JWT exchange runs
 non-interactively from then on.
 
+## One-time setup: envelope custom fields
+
+`downloadSignedDocument($envelopeId, $documentId)` lets you fetch a single
+signed document by the **same `Document::$id` you set when sending** — even
+though DocuSign identifies documents only by a positional id (`"1"`, `"2"`) and
+by name. To bridge that, `send()` records a small JSON map of
+`Document::$id → positional id` in an **envelope-level text custom field named
+`sdkDocumentMap`**, and the download reads it back from
+`GET /envelopes/{id}/custom_fields`.
+
+This field is written ad-hoc at send time and needs **no admin setup on a
+default account** — it is an *envelope* custom field, not a DocuSign *document*
+custom field (those must be pre-defined by an admin) and not the inline
+per-document field DocuSign silently drops.
+
+The one caveat: some accounts enable a restriction that only allows
+**account-defined** custom fields on envelopes. If yours does, a DocuSign admin
+must either relax that restriction or add an account custom field named
+`sdkDocumentMap` (free text, not required, not shown) — otherwise the field is
+dropped and `downloadSignedDocument()` can't resolve ids. You can confirm the
+round-trip on your account with `verify-custom-field-roundtrip.php` in this
+package.
+
 ## Requirements
 
-- PHP 8.5
+- PHP 8.3
 - `laulamanapps/documentsigner-sdk`
 - `firebase/php-jwt` (pulled automatically)
 - A DocuSign developer/production account, integration key, RSA key pair, and

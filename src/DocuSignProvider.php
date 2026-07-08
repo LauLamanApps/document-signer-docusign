@@ -30,11 +30,17 @@ final class DocuSignProvider implements SignatureProvider
     public const string NAME = 'docusign';
 
     /**
-     * Name of the DocuSign per-document custom field that stores the caller's
-     * own {@see Document::$id}. Written on `send()`, read back when resolving a
-     * single-document download so callers can keep using their own id.
+     * Name of the DocuSign **envelope-level** text custom field that stores a
+     * JSON map of `Document::$id => DocuSign positional documentId`. Written on
+     * `send()`, read back by `downloadSignedDocument()` to resolve the caller's
+     * own id.
+     *
+     * Envelope custom fields are used deliberately: unlike per-document
+     * `documents[].documentFields` supplied inline at envelope creation — which
+     * DocuSign silently drops — envelope custom fields survive a
+     * create → complete → read round-trip.
      */
-    private const string DOCUMENT_ID_FIELD = 'sdkDocumentId';
+    private const string DOCUMENT_MAP_FIELD = 'sdkDocumentMap';
 
     private readonly DocuSignConfig $config;
     private readonly DocuSignClient $client;
@@ -63,6 +69,7 @@ final class DocuSignProvider implements SignatureProvider
         $tabsBySigner = array_fill_keys(array_keys($signerIndex), $this->emptyTabBuckets());
 
         $docNumber = 1;
+        $documentIdMap = [];
         foreach ($envelope->documents as $document) {
             $prepared = $this->replacer->replace($document->html, $this->parser->parse($document->html));
             $this->assertFieldsResolvable($envelope, $document, $prepared->fields);
@@ -74,19 +81,13 @@ final class DocuSignProvider implements SignatureProvider
                 footerPlacement: $document->footerPlacement,
             ));
             $documentId = (string) $docNumber++;
+            $documentIdMap[$document->id] = $documentId;
 
             $apiDocuments[] = [
                 'documentBase64' => base64_encode($pdf),
                 'name'           => $document->name,
                 'fileExtension'  => 'pdf',
                 'documentId'     => $documentId,
-                // Persist the caller's own Document::$id so a later
-                // downloadSignedDocument() can resolve it back to this positional
-                // documentId. DocuSign only echoes its positional ids and the
-                // (space-mangled) name otherwise. See DOCUMENT_ID_FIELD.
-                'documentFields' => [
-                    ['name' => self::DOCUMENT_ID_FIELD, 'value' => $document->id],
-                ],
             ];
 
             foreach ($prepared->fields as $field) {
@@ -124,9 +125,17 @@ final class DocuSignProvider implements SignatureProvider
             ];
         }
 
-        if ($envelope->metadata !== []) {
-            $payload['customFields'] = ['textCustomFields' => $this->buildCustomFields($envelope->metadata)];
-        }
+        // Envelope-level custom fields: the caller's metadata, plus our own
+        // document-id map. The map is what makes downloadSignedDocument() work —
+        // it round-trips where inline per-document fields do not.
+        $textCustomFields = $this->buildCustomFields($envelope->metadata);
+        $textCustomFields[] = [
+            'name'     => self::DOCUMENT_MAP_FIELD,
+            'value'    => (string) json_encode($documentIdMap),
+            'required' => 'false',
+            'show'     => 'false',
+        ];
+        $payload['customFields'] = ['textCustomFields' => $textCustomFields];
 
         $response = $this->client->createEnvelope($payload);
 
@@ -187,28 +196,92 @@ final class DocuSignProvider implements SignatureProvider
      * Map the caller's {@see Document::$id} to DocuSign's positional document id.
      *
      * DocuSign never stores the caller's arbitrary id as its own `documentId`
-     * (that must be a positional integer), so we look the document up in the
-     * envelope's document list:
+     * (that must be a positional integer), and it silently drops per-document
+     * fields supplied inline at creation. So we resolve in two steps:
      *
-     *  1. by the {@see DOCUMENT_ID_FIELD} custom field written on `send()`
-     *     (exact match — the reliable path for envelopes sent by this SDK); then
-     *  2. by normalized `name`, for envelopes created before the custom field
-     *     existed, or where the caller passes the document name. Normalization
-     *     folds case and collapses runs of whitespace/underscores, so DocuSign's
-     *     space-to-underscore filename mangling doesn't matter.
+     *  1. Read the {@see DOCUMENT_MAP_FIELD} envelope custom field written on
+     *     `send()` — a JSON `Document::$id => positional id` map. Envelope custom
+     *     fields round-trip reliably, so this is the primary path for anything
+     *     sent by this SDK.
+     *  2. Fall back to matching the caller's value against a document's
+     *     normalized `name` (case-folded, `[\s_]+` collapsed) — for envelopes
+     *     sent before the map existed, or when the caller passes the document
+     *     name. This only fetches the document list when step 1 misses.
      *
      * The certificate-of-completion entry (`documentId === "certificate"`, i.e.
-     * the archive's `Summary.pdf`) is skipped — it belongs to no caller document.
+     * the archive's `Summary.pdf`) is never returned — it belongs to no caller
+     * document.
      *
      * @throws SignedDocumentUnavailableException When nothing matches (yet).
      */
     private function resolveDocumentId(string $providerEnvelopeId, string $documentId): string
     {
+        // 1. Primary: the round-tripping envelope custom-field map.
+        $map = $this->documentIdMap($providerEnvelopeId);
+        $positionalId = $map[$documentId] ?? null;
+        if (is_string($positionalId) && $positionalId !== '' && $positionalId !== 'certificate') {
+            return $positionalId;
+        }
+
+        // 2. Fallback: normalized document-name match.
+        $byName = $this->resolveByDocumentName($providerEnvelopeId, $documentId);
+        if ($byName !== null) {
+            return $byName;
+        }
+
+        throw SignedDocumentUnavailableException::for(
+            providerName: 'DocuSign',
+            providerEnvelopeId: $providerEnvelopeId,
+            documentId: $documentId,
+        );
+    }
+
+    /**
+     * Read and decode the `Document::$id => positional id` map from the
+     * envelope's custom fields. Returns `[]` when the field is absent (e.g. an
+     * envelope sent before this SDK wrote it) or unparseable.
+     *
+     * @return array<string, string>
+     */
+    private function documentIdMap(string $providerEnvelopeId): array
+    {
+        $response = $this->client->getEnvelopeCustomFields($providerEnvelopeId);
+        $fields = is_array($response['textCustomFields'] ?? null) ? $response['textCustomFields'] : [];
+
+        foreach ($fields as $field) {
+            if (!is_array($field) || ($field['name'] ?? null) !== self::DOCUMENT_MAP_FIELD) {
+                continue;
+            }
+
+            $decoded = json_decode((string) ($field['value'] ?? ''), true);
+            if (!is_array($decoded)) {
+                return [];
+            }
+
+            $map = [];
+            foreach ($decoded as $callerId => $positionalId) {
+                if (is_string($callerId) && (is_string($positionalId) || is_int($positionalId))) {
+                    $map[$callerId] = (string) $positionalId;
+                }
+            }
+
+            return $map;
+        }
+
+        return [];
+    }
+
+    /**
+     * Fallback resolution by normalized document name against the envelope's
+     * document list, skipping the certificate. Returns the positional id, or
+     * `null` when nothing matches.
+     */
+    private function resolveByDocumentName(string $providerEnvelopeId, string $documentId): ?string
+    {
         $response = $this->client->listDocuments($providerEnvelopeId);
         $documents = is_array($response['envelopeDocuments'] ?? null) ? $response['envelopeDocuments'] : [];
 
         $wantedName = $this->normalizeDocumentName($documentId);
-        $nameMatch = null;
 
         foreach ($documents as $entry) {
             if (!is_array($entry)) {
@@ -220,44 +293,14 @@ final class DocuSignProvider implements SignatureProvider
                 continue; // skip the Summary.pdf certificate and malformed entries
             }
 
-            // 1. Exact match on the caller-id custom field — the primary path.
-            foreach ($this->documentFields($entry) as $field) {
-                if (($field['name'] ?? null) === self::DOCUMENT_ID_FIELD
-                    && ($field['value'] ?? null) === $documentId
-                ) {
-                    return $positionalId;
-                }
-            }
-
-            // 2. Remember the first normalized-name match as a fallback.
-            if ($nameMatch === null
-                && is_string($entry['name'] ?? null)
+            if (is_string($entry['name'] ?? null)
                 && $this->normalizeDocumentName($entry['name']) === $wantedName
             ) {
-                $nameMatch = $positionalId;
+                return $positionalId;
             }
         }
 
-        if ($nameMatch !== null) {
-            return $nameMatch;
-        }
-
-        throw SignedDocumentUnavailableException::for(
-            providerName: 'DocuSign',
-            providerEnvelopeId: $providerEnvelopeId,
-            documentId: $documentId,
-        );
-    }
-
-    /**
-     * @param array<string, mixed> $entry
-     * @return list<array<string, mixed>>
-     */
-    private function documentFields(array $entry): array
-    {
-        $fields = $entry['documentFields'] ?? null;
-
-        return is_array($fields) ? array_values(array_filter($fields, 'is_array')) : [];
+        return null;
     }
 
     /**
