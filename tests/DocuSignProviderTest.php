@@ -12,6 +12,7 @@ use LauLamanApps\DocumentSigner\Sdk\Document\Document;
 use LauLamanApps\DocumentSigner\Sdk\Envelope\Envelope;
 use LauLamanApps\DocumentSigner\Sdk\Envelope\EnvelopeStatus;
 use LauLamanApps\DocumentSigner\Sdk\Exception\ProviderException;
+use LauLamanApps\DocumentSigner\Sdk\Exception\SignedDocumentUnavailableException;
 use LauLamanApps\DocumentSigner\Sdk\Pdf\PdfRenderer;
 use LauLamanApps\DocumentSigner\Sdk\Signer\Signer;
 use LauLamanApps\DocumentSigner\Sdk\Signer\SigningOrder;
@@ -71,6 +72,13 @@ final class DocuSignProviderTest extends TestCase
         );
         self::assertNotEmpty($payload['documents'][0]['documentBase64']);
         self::assertStringStartsWith('%PDF-FAKE', base64_decode($payload['documents'][0]['documentBase64']));
+
+        // The caller's Document::$id ('nda') is persisted as a documentField so a
+        // later downloadSignedDocument('nda') can resolve back to this document.
+        self::assertSame(
+            [['name' => 'sdkDocumentId', 'value' => 'nda']],
+            $payload['documents'][0]['documentFields'],
+        );
     }
 
     #[Test]
@@ -191,28 +199,103 @@ final class DocuSignProviderTest extends TestCase
     }
 
     #[Test]
-    public function download_signed_document_returns_the_pdf_for_a_single_document(): void
+    public function download_signed_document_resolves_the_caller_id_via_the_document_field(): void
     {
+        // Caller asks for their own id 'C-1-sepa'; it lives on the second
+        // document, whose positional DocuSign id is '2'.
         [$provider, $history] = $this->buildProvider([
             new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
-            new Response(200, [], '%PDF-SIGNED-NDA'),
+            new Response(200, [], json_encode($this->documentListBody())),
+            new Response(200, [], '%PDF-SIGNED-SEPA'),
         ]);
 
-        $file = $provider->downloadSignedDocument('env-42', '1');
+        $file = $provider->downloadSignedDocument('env-42', 'C-1-sepa');
 
         self::assertSame('pdf', $file->getExtension());
-        self::assertSame('%PDF-SIGNED-NDA', file_get_contents($file->getPathname()));
+        self::assertSame('%PDF-SIGNED-SEPA', file_get_contents($file->getPathname()));
 
+        // It first listed the documents (with fields), then fetched positional '2'.
         self::assertStringContainsString(
-            '/envelopes/env-42/documents/1',
+            '/envelopes/env-42/documents?include_document_fields=true',
             (string) $history[1]['request']->getUri(),
         );
-        self::assertSame(
-            'application/pdf',
-            $history[1]['request']->getHeaderLine('Accept'),
-        );
+        self::assertStringContainsString('/envelopes/env-42/documents/2', (string) $history[2]['request']->getUri());
+        self::assertSame('application/pdf', $history[2]['request']->getHeaderLine('Accept'));
 
         @unlink($file->getPathname());
+    }
+
+    #[Test]
+    public function download_signed_document_falls_back_to_the_normalized_name(): void
+    {
+        // Older envelope: no documentFields. The caller passes a name whose
+        // spacing/casing differs from DocuSign's stored, underscore-mangled name.
+        $list = [
+            'envelopeDocuments' => [
+                ['documentId' => '1', 'name' => 'NDA', 'type' => 'content'],
+                ['documentId' => '2', 'name' => 'SEPA_machtiging_C-1', 'type' => 'content'],
+                ['documentId' => 'certificate', 'name' => 'Summary', 'type' => 'summary'],
+            ],
+        ];
+
+        [$provider, $history] = $this->buildProvider([
+            new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
+            new Response(200, [], json_encode($list)),
+            new Response(200, [], '%PDF-SIGNED-SEPA'),
+        ]);
+
+        $file = $provider->downloadSignedDocument('env-42', 'sepa machtiging c-1');
+
+        self::assertSame('%PDF-SIGNED-SEPA', file_get_contents($file->getPathname()));
+        self::assertStringContainsString('/envelopes/env-42/documents/2', (string) $history[2]['request']->getUri());
+
+        @unlink($file->getPathname());
+    }
+
+    #[Test]
+    public function download_signed_document_ignores_the_certificate_and_throws_when_unresolved(): void
+    {
+        // The only entry that could name-match is the Summary certificate, which
+        // must be skipped — so this resolves to nothing.
+        $list = [
+            'envelopeDocuments' => [
+                ['documentId' => '1', 'name' => 'NDA', 'type' => 'content',
+                 'documentFields' => [['name' => 'sdkDocumentId', 'value' => 'nda']]],
+                ['documentId' => 'certificate', 'name' => 'Summary', 'type' => 'summary'],
+            ],
+        ];
+
+        [$provider] = $this->buildProvider([
+            new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
+            new Response(200, [], json_encode($list)),
+        ]);
+
+        try {
+            $provider->downloadSignedDocument('env-42', 'Summary');
+            self::fail('Expected SignedDocumentUnavailableException.');
+        } catch (SignedDocumentUnavailableException $e) {
+            self::assertTrue($e->isRetryable());
+            self::assertSame('env-42', $e->providerEnvelopeId);
+            self::assertStringContainsString('Summary', $e->getMessage());
+        }
+    }
+
+    /**
+     * A two-document envelope list with caller-id fields, plus the certificate.
+     *
+     * @return array<string, mixed>
+     */
+    private function documentListBody(): array
+    {
+        return [
+            'envelopeDocuments' => [
+                ['documentId' => '1', 'name' => 'NDA', 'type' => 'content',
+                 'documentFields' => [['name' => 'sdkDocumentId', 'value' => 'nda']]],
+                ['documentId' => '2', 'name' => 'SEPA machtiging C-1', 'type' => 'content',
+                 'documentFields' => [['name' => 'sdkDocumentId', 'value' => 'C-1-sepa']]],
+                ['documentId' => 'certificate', 'name' => 'Summary', 'type' => 'summary'],
+            ],
+        ];
     }
 
     #[Test]
@@ -224,25 +307,25 @@ final class DocuSignProviderTest extends TestCase
     }
 
     #[Test]
-    public function download_audit_returns_the_audit_events_json(): void
+    public function download_audit_returns_the_certificate_of_completion_pdf(): void
     {
         [$provider, $history] = $this->buildProvider([
             new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
-            new Response(200, [], '{"auditEvents":[{"eventFields":[{"name":"action","value":"Sent"}]}]}'),
+            new Response(200, [], '%PDF-CERTIFICATE-OF-COMPLETION'),
         ]);
 
         $file = $provider->downloadAudit('env-42');
 
-        self::assertSame('json', $file->getExtension());
-
-        $payload = json_decode((string) file_get_contents($file->getPathname()), true, 512, JSON_THROW_ON_ERROR);
-        self::assertArrayHasKey('auditEvents', $payload);
-        self::assertSame('Sent', $payload['auditEvents'][0]['eventFields'][0]['value']);
+        // The human-readable evidence PDF (analog of ValidSign's Evidence
+        // Summary), not the raw audit-events JSON.
+        self::assertSame('pdf', $file->getExtension());
+        self::assertSame('%PDF-CERTIFICATE-OF-COMPLETION', file_get_contents($file->getPathname()));
 
         self::assertStringContainsString(
-            '/envelopes/env-42/audit_events',
+            '/envelopes/env-42/documents/certificate',
             (string) $history[1]['request']->getUri(),
         );
+        self::assertSame('application/pdf', $history[1]['request']->getHeaderLine('Accept'));
 
         @unlink($file->getPathname());
     }

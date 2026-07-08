@@ -57,6 +57,28 @@ final class DocuSignClient
         );
     }
 
+    /**
+     * List the envelope's documents, including each one's `documentFields`
+     * (custom name/value metadata set at send time) and DocuSign's positional
+     * `documentId`. Used to resolve a caller's `Document::$id` back to the
+     * positional id DocuSign needs for a single-document download.
+     *
+     * `include_document_fields=true` guarantees the `documentFields` are present
+     * on every entry. The response also carries the certificate-of-completion as
+     * a synthetic entry whose `documentId` is `"certificate"`.
+     *
+     * @return array<string, mixed>
+     */
+    public function listDocuments(string $envelopeId): array
+    {
+        return $this->jsonRequest(
+            'GET',
+            $this->accountPath(
+                'envelopes/' . rawurlencode($envelopeId) . '/documents?include_document_fields=true',
+            ),
+        );
+    }
+
     public function downloadSignedDocument(string $envelopeId, string $documentId): string
     {
         return $this->rawRequest(
@@ -68,6 +90,27 @@ final class DocuSignClient
         );
     }
 
+    /**
+     * The Certificate of Completion PDF — DocuSign's human-readable evidence
+     * report (signer identities, timestamps, IP addresses, auth methods). This
+     * is the analog of ValidSign's Evidence Summary Report; `documentId` is the
+     * reserved literal `certificate`.
+     */
+    public function downloadCertificateOfCompletion(string $envelopeId): string
+    {
+        return $this->rawRequest(
+            'GET',
+            $this->accountPath('envelopes/' . rawurlencode($envelopeId) . '/documents/certificate'),
+            ['headers' => ['Accept' => 'application/pdf']],
+        );
+    }
+
+    /**
+     * The granular, machine-readable envelope audit-events feed (JSON). Not what
+     * {@see \LauLamanApps\DocumentSigner\DocuSign\DocuSignProvider::downloadAudit()}
+     * returns (that serves the Certificate of Completion PDF for cross-provider
+     * consistency) — call this directly on the client when you need the events.
+     */
     public function downloadAuditEventsJson(string $envelopeId): string
     {
         return $this->rawRequest(
