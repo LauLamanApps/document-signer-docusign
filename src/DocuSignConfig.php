@@ -17,6 +17,12 @@ final readonly class DocuSignConfig
      * @param int    $accessTokenTtlSeconds JWT validity window; DocuSign maxes out around 3600.
      * @param int    $timeoutSeconds HTTP timeout for non-upload requests.
      * @param int    $uploadTimeoutSeconds  HTTP timeout for envelope create / file upload.
+     * @param int    $anchorYOffsetPixels   Uniform vertical nudge (in pixels) added to every tab's
+     *                                       `anchorYOffset`. Positive moves fields DOWN the page,
+     *                                       negative UP. The SDK already offsets each tab so its top
+     *                                       edge lands on the anchor (matching ValidSign); use this
+     *                                       only to fine-tune any residual, document-wide vertical
+     *                                       drift. Default 0.
      */
     public function __construct(
         public string $integrationKey,
@@ -29,6 +35,7 @@ final readonly class DocuSignConfig
         public int    $accessTokenTtlSeconds = 3600,
         public int    $timeoutSeconds        = 15,
         public int    $uploadTimeoutSeconds  = 60,
+        public int    $anchorYOffsetPixels   = 0,
     ) {
         if ($integrationKey === '') {
             throw new \InvalidArgumentException('DocuSign integrationKey must be non-empty.');

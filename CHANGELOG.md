@@ -3,6 +3,27 @@
 All notable changes to `laulamanapps/document-signer-docusign` are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.3.2] - 2026-07-08
+
+### Fixed — anchored fields were placed too high
+
+DocuSign seats an anchored tab above the anchor line, so fields rendered too
+high relative to their `{[type:signer:name]}` placeholder (ValidSign, which
+anchors the top-left, was correct). Each tab now carries a vertical
+`anchorYOffset` that drops its **top edge onto the anchor**, matching ValidSign,
+and every field type is sent with an explicit size mirroring ValidSign's.
+
+Offsets were measured against the live DocuSign API: text/date/checkbox tabs
+render at the size we set, so half their height centres the top on the anchor;
+signature/initials render as fixed-size "Sign Here" / "Initial Here" adornments
+independent of the field size, so they use measured constants.
+
+### Added
+
+- `DocuSignConfig::$anchorYOffsetPixels` — a document-wide vertical fine-tune (in
+  pixels) added to every tab's `anchorYOffset` (positive = down). Default 0; use
+  it to correct any residual, uniform drift without a code change.
+
 ## [2.3.1] - 2026-07-08
 
 ### Fixed — `downloadSignedDocument()` failed for every DocuSign envelope

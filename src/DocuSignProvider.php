@@ -424,29 +424,71 @@ final class DocuSignProvider implements SignatureProvider
      */
     private function buildTab(string $documentId, PreparedField $field): array
     {
+        [$width, $height] = $this->tabSize($field->type);
+
+        // Without a vertical offset DocuSign seats an anchored tab too high. The
+        // offset below drops each tab's TOP edge onto the anchor line — matching
+        // where ValidSign's text-tags place their top-left, so the two providers
+        // agree. `anchorYOffsetPixels` is a document-wide fine-tune on top.
+        // (Positive anchorYOffset moves the tab down.)
         $tab = [
             'documentId'               => $documentId,
             'pageNumber'               => '1',
             'tabLabel'                 => $field->fieldName,
             'anchorString'             => $field->anchorString,
             'anchorXOffset'            => '0',
-            'anchorYOffset'            => '0',
+            'anchorYOffset'            => (string) ($this->anchorYOffset($field->type) + $this->config->anchorYOffsetPixels),
             'anchorUnits'              => 'pixels',
             'anchorIgnoreIfNotPresent' => 'false',
             'anchorCaseSensitive'      => 'true',
+            'width'                    => $width,
+            'height'                   => $height,
         ];
 
         // Signature / initials / dateSigned tabs are always required in DocuSign
         // and don't accept the `required` attribute. Text and Checkbox tabs do.
-        if ($field->type === FieldType::Text) {
-            $tab['required'] = $field->required ? 'true' : 'false';
-            $tab['width']    = 180;
-            $tab['height']   = 18;
-        } elseif ($field->type === FieldType::Checkbox) {
+        if ($field->type === FieldType::Text || $field->type === FieldType::Checkbox) {
             $tab['required'] = $field->required ? 'true' : 'false';
         }
 
         return $tab;
+    }
+
+    /**
+     * Nominal `[width, height]` per field type, in pixels — mirrors the sizes
+     * ValidSign uses so the two providers place equally-sized fields.
+     *
+     * @return array{0: int, 1: int}
+     */
+    private function tabSize(FieldType $type): array
+    {
+        return match ($type) {
+            FieldType::Signature => [200, 50],
+            FieldType::Initials  => [100, 30],
+            FieldType::Text      => [180, 18],
+            FieldType::Date      => [120, 20],
+            FieldType::Checkbox  => [20, 20],
+        };
+    }
+
+    /**
+     * Vertical anchor offset (px) that lands a tab's TOP edge on the anchor line,
+     * measured against the live DocuSign API.
+     *
+     * Text / date / checkbox tabs render at the height we set, so half the height
+     * centres the top on the anchor. Signature and initials render as fixed-size
+     * "Sign Here" / "Initial Here" adornments whose placement is independent of
+     * the field size, so they use measured constants rather than half-height.
+     */
+    private function anchorYOffset(FieldType $type): int
+    {
+        [, $height] = $this->tabSize($type);
+
+        return match ($type) {
+            FieldType::Signature => 31,
+            FieldType::Initials  => 36,
+            default              => intdiv($height, 2),
+        };
     }
 
     private function bucketForFieldType(FieldType $type): string

@@ -363,7 +363,7 @@ final class DocuSignProviderTest extends TestCase
      * @param array<int, Response> $responses
      * @return array{0: DocuSignProvider, 1: \ArrayObject<int, array<string, mixed>>}
      */
-    private function buildProvider(array $responses): array
+    private function buildProvider(array $responses, int $anchorYOffsetPixels = 0): array
     {
         $mock = new MockHandler($responses);
         $history = new \ArrayObject();
@@ -374,6 +374,7 @@ final class DocuSignProviderTest extends TestCase
         $config = new DocuSignConfig(
             integrationKey: 'k', userId: 'u', accountId: 'a',
             privateKey:     (string) self::$privateKey,
+            anchorYOffsetPixels: $anchorYOffsetPixels,
         );
 
         $auth = new DocuSignJwtAuth($config, $http);
@@ -444,6 +445,58 @@ final class DocuSignProviderTest extends TestCase
         self::assertSame('true', $byName['opt_in']->value);
         self::assertSame('1', $byName['iban']->documentId);
         self::assertSame('1', $byName['iban']->signerKey);
+    }
+
+    #[Test]
+    public function tabs_are_offset_so_their_top_edge_lands_on_the_anchor(): void
+    {
+        $envelope = new Envelope(
+            name:         'Mix',
+            documents:    [new Document(
+                id:   'doc',
+                name: 'Doc',
+                html: '<p>{[signature:s1:sig]}{[text:s1:note]}{[date:s1:when]}{[initials:s1:par]}</p>',
+            )],
+            signers:      [new Signer('s1', 'Jane Doe', 'jane@example.com')],
+            emailSubject: 'Please sign',
+        );
+
+        [$provider, $history] = $this->buildProvider([
+            new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
+            new Response(201, [], json_encode(['envelopeId' => 'env-1', 'status' => 'sent'])),
+        ]);
+
+        $provider->send($envelope);
+
+        $tabs = json_decode((string) $history[1]['request']->getBody(), true, 512, JSON_THROW_ON_ERROR)
+            ['recipients']['signers'][0]['tabs'];
+
+        // Adornment tabs use measured constants; field tabs use half their height.
+        // All values verified against the live DocuSign API (top edge on anchor).
+        self::assertSame('31', $tabs['signHereTabs'][0]['anchorYOffset']);
+        self::assertSame('pixels', $tabs['signHereTabs'][0]['anchorUnits']);
+        self::assertSame(200, $tabs['signHereTabs'][0]['width']);
+        self::assertSame(50, $tabs['signHereTabs'][0]['height']);
+        self::assertSame('36', $tabs['initialHereTabs'][0]['anchorYOffset']);
+        self::assertSame('9', $tabs['textTabs'][0]['anchorYOffset']);   // 18 / 2
+        self::assertSame('10', $tabs['dateSignedTabs'][0]['anchorYOffset']); // 20 / 2
+    }
+
+    #[Test]
+    public function the_anchor_y_offset_pixels_config_nudges_every_tab(): void
+    {
+        [$provider, $history] = $this->buildProvider([
+            new Response(200, [], json_encode(['access_token' => 'tok', 'expires_in' => 3600])),
+            new Response(201, [], json_encode(['envelopeId' => 'env-1', 'status' => 'sent'])),
+        ], anchorYOffsetPixels: 8);
+
+        $provider->send($this->envelopeWithOneSigner());
+
+        $tabs = json_decode((string) $history[1]['request']->getBody(), true, 512, JSON_THROW_ON_ERROR)
+            ['recipients']['signers'][0]['tabs'];
+
+        // Signature base offset (31) + configured nudge (8).
+        self::assertSame('39', $tabs['signHereTabs'][0]['anchorYOffset']);
     }
 
     private function envelopeWithOneSigner(): Envelope

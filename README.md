@@ -98,6 +98,28 @@ Callers own the file lifecycle — copy or `@unlink()` when done.
 | `Date`      | `dateSignedTabs` |
 | `Checkbox`  | `checkboxTabs` |
 
+## Field positioning
+
+Fields are placed by anchoring each DocuSign tab to the hidden
+`{[type:signer:name]}` marker in the rendered PDF. DocuSign otherwise seats an
+anchored tab *above* the marker, so this package offsets every tab so its **top
+edge lands on the marker** — the same reference point ValidSign uses, so the two
+providers position identically. Each field type is also sent with an explicit
+size mirroring ValidSign's.
+
+If a whole document still sits slightly high or low on your account, nudge every
+field with one knob — no code change:
+
+```php
+new DocuSignConfig(
+    // ...credentials...
+    anchorYOffsetPixels: 6,   // move every field 6px DOWN (negative = up). Default 0.
+);
+```
+
+(In the Laravel/Symfony packages this is the `anchor_y_offset_pixels` provider
+config value / `DOCUSIGN_ANCHOR_Y_OFFSET_PIXELS` env var.)
+
 ## One-time setup: user consent
 
 The first time the integration key impersonates a user, the user must approve
